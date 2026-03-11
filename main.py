@@ -129,25 +129,83 @@ def process_plate(res):
     return formatted_text
 
 
-def detect_plate_location(gray, edged):
-    keypoints = cv2.findContours(edged.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    contours = imutils.grab_contours(keypoints)
-    if not contours:
+def detect_plate_location(gray):
+    """
+    Find the best rectangle for the plate using dual paths:
+    1. Edge-based (Canny + Dilation) - detects high-contrast borders.
+    2. Region-based (Adaptive Threshold) - detects the white plate body.
+    Collects all candidates and picks the one that best fits plate geometry.
+    """
+    if gray is None:
         return None
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:10]
-    for contour in contours:
-        approx = cv2.approxPolyDP(contour, 10, True)
-        if len(approx) == 4:
-            return approx
-    for contour in contours:
-        x, y, w, h = cv2.boundingRect(contour)
-        aspect_ratio = w / float(h)
-        area = cv2.contourArea(contour)
-        rect_area = w * h
-        solidity = float(area) / rect_area if rect_area > 0 else 0
-        if 0.5 < aspect_ratio < 5.0 and area > 1000 and solidity > 0.5:
-            return np.array([[[x, y]], [[x+w, y]], [[x+w, y+h]], [[x, y+h]]])
-    return None
+
+    # Path 1: Edges with Dilation
+    bfilt = cv2.bilateralFilter(gray, 11, 17, 17)
+    edged = cv2.Canny(bfilt, 30, 200)
+    # Smaller kernel for dilation to avoid merging with nearby objects
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    dilated = cv2.dilate(edged, kernel, iterations=1)
+    
+    # Path 2: Adaptive Threshold
+    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                   cv2.THRESH_BINARY_INV, 11, 2)
+    
+    candidates = []
+    
+    # Process both binary images to find candidates
+    for i, binary_img in enumerate([dilated, thresh]):
+        kp = cv2.findContours(binary_img.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        contours = imutils.grab_contours(kp)
+        if not contours:
+            continue
+            
+        # Inspect top 15 contours by area
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:15]
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < 600: continue # Slightly lower area min to allow for smaller views
+            
+            x, y, w, h = cv2.boundingRect(contour)
+            aspect = w / float(h)
+            
+            # Rebalance aspect ratios: wider range (0.5 to 6.5) to capture skewed/long plates
+            if not (0.5 < aspect < 6.5):
+                continue
+            
+            # Geometry checks
+            perim = cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, 0.02 * perim, True)
+            rect_area = w * h
+            solidity = float(area) / rect_area if rect_area > 0 else 0
+            
+            # Scoring:
+            # 1. Higher solidity is better (rectangularity)
+            # 2. 4-point approximation is a strong signal
+            # 3. Path 1 (Edges) typically has higher precision than Path 2 (Regions)
+            score = solidity * 10.0
+            if len(approx) == 4:
+                score += 5.0
+            if i == 0: # Favor edge-based detection slightly if sharp
+                score += 2.0
+                
+            if solidity > 0.4:
+                candidates.append({
+                    'score': score,
+                    'approx': approx,
+                    'rect': np.array([[[x, y]], [[x+w, y]], [[x+w, y+h]], [[x, y+h]]])
+                })
+                
+    if not candidates:
+        return None
+        
+    # Pick the highest scoring candidate
+    best = sorted(candidates, key=lambda x: x['score'], reverse=True)[0]
+    
+    # Prefer the 4-point approximation if it exists and score is high
+    if len(best['approx']) == 4:
+        return best['approx']
+    return best['rect']
 
 
 def preprocess_crop(img):
@@ -332,13 +390,25 @@ class LicensePlateApp:
                                     command=self._switch_camera)
         self.switch_btn.pack(side="left")
 
-        # Manual entry button
-        tk.Button(left, text="⌨  Nhập tay biển số",
+        # Capture / Commit buttons
+        btn_row = tk.Frame(left, bg="#1e1e2e")
+        btn_row.pack(fill="x", pady=(8, 0))
+
+        tk.Button(btn_row, text="⌨  Nhập tay biển số",
                   bg="#cba6f7", fg="#1e1e2e",
                   font=("Segoe UI", 11, "bold"),
                   relief="flat", padx=16, pady=8,
                   cursor="hand2",
-                  command=self._open_manual_entry).pack(pady=(8, 0), fill="x")
+                  command=self._open_manual_entry).pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        self.force_commit_btn = tk.Button(btn_row, text="✅ Nhập ngay biển đang quét",
+                                         bg="#a6e3a1", fg="#1e1e2e",
+                                         font=("Segoe UI", 11, "bold"),
+                                         relief="flat", padx=16, pady=8,
+                                         cursor="hand2",
+                                         state="disabled",
+                                         command=self._force_commit)
+        self.force_commit_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
 
         # Right column: info + history
         right = tk.Frame(self.root, bg="#1e1e2e", width=340)
@@ -532,9 +602,7 @@ class LicensePlateApp:
                     # Pre-compute plate detection here (cheap) to save OCR thread time
                     small = imutils.resize(frame, width=640)
                     gray  = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-                    bfilt = cv2.bilateralFilter(gray, 11, 17, 17)
-                    edged = cv2.Canny(bfilt, 30, 200)
-                    loc   = detect_plate_location(gray, edged)
+                    loc   = detect_plate_location(gray)
                     scale = frame.shape[1] / small.shape[1]
                     try:
                         self._ocr_queue.put_nowait((frame.copy(), gray, loc, scale))
@@ -642,6 +710,8 @@ class LicensePlateApp:
     def _handle_result(self, text, conf, annotated, crop):
         if text is not None and conf >= self.MIN_CONF:
             self.no_detect_count = 0
+            self.force_commit_btn.configure(state="normal") # Enable force commit
+            
             if text == self.vote_text:
                 self.vote_count += 1
                 if conf > self.vote_best_conf:
@@ -662,6 +732,8 @@ class LicensePlateApp:
         else:
             self.vote_text = None
             self.vote_count = 0
+            self.force_commit_btn.configure(state="disabled") # Disable if no detection
+            
             self.no_detect_count += 1
             if self.no_detect_count == self.NO_DETECT_FRAMES and not self.manual_dialog_open:
                 self.status_var.set("⚠  Không nhận diện được — nhấn 'Nhập tay' để nhập")
@@ -732,6 +804,21 @@ class LicensePlateApp:
             self.status_var.set(f"✔  Đã lưu (nhập tay): {plate_text.strip()}")
 
     # ─── Export ────────────────────────────────────────────────────────────────
+
+    def _force_commit(self):
+        """Force the current best OCR result into the database immediately."""
+        if self.vote_text and self.vote_best_crop is not None:
+            text = self.vote_text
+            conf = self.vote_best_conf
+            crop = self.vote_best_crop
+            frame = self.vote_best_frame
+            
+            # Reset voting to avoid immediate re-commit
+            self.vote_text = None
+            self.vote_count = 0
+            self.force_commit_btn.configure(state="disabled")
+            
+            self._commit_plate(text, conf, crop, frame, source="auto")
 
     def _export_csv(self):
         rows = [self.tree.item(i)["values"] for i in self.tree.get_children()]
