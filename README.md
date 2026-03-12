@@ -17,17 +17,22 @@ Trước khi chạy, máy tính của bạn cần được cài đặt Python (p
 
 2. **Di chuyển vào thư mục dự án**:
    Mở terminal Bash/CMD mới và gõ lệnh để đi đến thư mục chứa code của bạn:
+   phải cd vào thư mục Camnhandien
    ```bash
-   cd D:\CAMNHANDIEN\Camnhandien
+   cd Camnhandien
    ```
 
-3. **Thiết lập môi trường ảo (venv)**:
+4. **Thiết lập môi trường ảo (venv)**:
    Môi trường ảo giúp chạy mã nguồn mà không ảnh hưởng tới hệ thống.
+   ```bash
+   python -m venv venv  
+   ```
+   Nếu không chạy được lệnh trên thì chạy lệnh này
    ```bash
    python -m venv venv
    ```
 
-4. **Kích hoạt môi trường ảo**:
+5. **Kích hoạt môi trường ảo**:
    - Trên **Windows CMD / PowerShell**:
      ```bash
      .\venv\Scripts\activate
@@ -37,7 +42,7 @@ Trước khi chạy, máy tính của bạn cần được cài đặt Python (p
      source venv/Scripts/activate
      ```
 
-5. **Cài đặt thư viện AI**:
+6. **Cài đặt thư viện AI**:
    Khi dòng lệnh có chữ `(venv)` ở đầu, hãy chạy lệnh cài đặt:
    ```bash
    pip install opencv-python easyocr imutils numpy Pillow
