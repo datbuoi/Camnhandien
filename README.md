@@ -29,7 +29,7 @@ Trước khi chạy, máy tính của bạn cần được cài đặt Python (p
    ```
    Nếu không chạy được lệnh trên thì chạy lệnh này
    ```bash
-   python -m venv venv
+   py -m venv venv
    ```
 
 5. **Kích hoạt môi trường ảo**:
